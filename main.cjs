@@ -59,6 +59,9 @@ app.whenReady().then(async () => {
       await window.webContents.executeJavaScript('document.getElementById("rollCanvas").scrollIntoView({block:"center"})');
       await new Promise(resolve=>setTimeout(resolve,150));
       fs.writeFileSync('artifacts/piano-roll.png',(await window.webContents.capturePage()).toPNG());
+      await window.webContents.executeJavaScript('document.querySelector("[data-zone=pads]").scrollIntoView({block:"center"})');
+      await new Promise(resolve=>setTimeout(resolve,150));
+      fs.writeFileSync('artifacts/pads-and-samples.png',(await window.webContents.capturePage()).toPNG());
       await window.webContents.executeJavaScript('document.getElementById("projectName").value="Close regression test"; document.getElementById("projectName").dispatchEvent(new Event("change"))');
       const closeTimeout=setTimeout(()=>{console.error('Window did not close');app.exit(1);},10000);
       window.once('closed',()=>{clearTimeout(closeTimeout);result.closePassed=true;fs.writeFileSync('artifacts/smoke.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result));app.exit(result.passed?0:1);});

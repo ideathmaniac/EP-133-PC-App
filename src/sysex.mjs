@@ -31,6 +31,10 @@ export function parseIdentity(bytes) {
   const family = bytes[8] + bytes[9] * 128, model = bytes[10] + bytes[11] * 128;
   return { deviceId: bytes[2], sku: `TE${String(family).padStart(3, '0')}AS${String(model).padStart(3, '0')}` };
 }
+export function parseDebugFrame(bytes) {
+  if (bytes.length < 7 || bytes[0] !== 240 || bytes[1] !== 0 || bytes[2] !== 32 || bytes[3] !== 118 || bytes[5] !== 51 || bytes.at(-1) !== 247) return null;
+  return { deviceId: bytes[4], text: utf8.decode(bytes.subarray(6, -1)).replace(/\0+$/, '') };
+}
 function nullString(bytes, start) {
   const end = bytes.indexOf(0, start); if (end < 0) throw new Error('Нет терминатора строки');
   return { value: utf8.decode(bytes.subarray(start, end)), end: end + 1 };
@@ -45,13 +49,18 @@ export function parseList(data, expectedPage) {
   return rows;
 }
 export class SysexTransport {
-  constructor(input, output, { timeout = 5000, log = () => {} } = {}) {
-    this.input = input; this.output = output; this.timeout = timeout; this.log = log; this.sequence = 0; this.pending = new Map(); this.closed = false;
+  constructor(input, output, { timeout = 5000, log = () => {}, onFatal = () => {} } = {}) {
+    this.input = input; this.output = output; this.timeout = timeout; this.log = log; this.onFatal = onFatal; this.sequence = 0; this.pending = new Map(); this.closed = false; this.faulted = false;
     this.listener = event => this.receive(event.data); input.addEventListener('midimessage', this.listener);
   }
   receive(bytes) {
     this.log('RX', bytes);
     try {
+      const debug = parseDebugFrame(bytes);
+      if (debug) {
+        const error = new Error(`EP-133 сообщил критическую ошибку: ${debug.text || 'debug frame'}. Отключите USB и перезагрузите устройство.`);
+        this.faulted = true; this.identification?.reject(error); for (const id of [...this.pending.keys()]) this.reject(id, error); this.onFatal(error, debug); return;
+      }
       const identity = parseIdentity(bytes);
       if (identity && this.identification) { this.identification.resolve(identity); return; }
       const msg = parseResponse(bytes); if (!msg || !msg.hasRequestId) return;
@@ -75,6 +84,7 @@ export class SysexTransport {
   }
   request(deviceId, command, payload) {
     if (this.closed) return Promise.reject(new Error('Соединение закрыто'));
+    if (this.faulted) return Promise.reject(new Error('FILE-соединение заблокировано после критической ошибки. Перезагрузите EP-133.'));
     if (command !== 1 && command !== 5) return Promise.reject(new Error('Команда не входит в режим чтения'));
     if (command === 5 && !([1, 3, 4].includes(payload[0]) || payload[0] === 7 && payload[1] === 2)) return Promise.reject(new Error('Запись на устройство отключена'));
     const id = this.sequence = (this.sequence + 1) % 4096;
@@ -92,7 +102,7 @@ export class ReadOnlyDevice {
   file(payload) { return this.transport.request(this.identity.deviceId, 5, payload); }
   async connect() {
     this.identity = await this.transport.identify();
-    if (this.identity.sku !== 'TE032AS001') throw new Error(`Выбрано ${this.identity.sku}; эта версия поддерживает EP-133`);
+    if (!['TE032AS001', 'TE032AS002'].includes(this.identity.sku)) throw new Error(`Выбрано ${this.identity.sku}; эта версия поддерживает EP-133`);
     const response = await this.transport.request(this.identity.deviceId, 1, []);
     this.metadata = Object.fromEntries(utf8.decode(response).replace(/\0+$/, '').split(';').filter(x => x.includes(':')).map(x => { const at = x.indexOf(':'); return [x.slice(0, at), x.slice(at + 1)]; }));
     const init = await this.file([1, 0, ...u32(4 * 1024 * 1024)]); requireBytes(init, 5);

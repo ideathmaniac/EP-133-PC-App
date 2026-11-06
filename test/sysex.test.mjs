@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pack7, unpack7, buildRequest, parseResponse, parseIdentity, parseList, SysexTransport, ReadOnlyDevice, u16, u32 } from '../src/sysex.mjs';
+import { pack7, unpack7, buildRequest, parseResponse, parseIdentity, parseDebugFrame, parseList, SysexTransport, ReadOnlyDevice, u16, u32 } from '../src/sysex.mjs';
 const text = s => [...new TextEncoder().encode(s)];
 class Input {
   listeners = new Set();
@@ -62,4 +62,13 @@ test('read-only command allowlist, timeout, cancellation and stale replies', asy
 });
 test('incorrect device file pages are rejected without exporting partial data', async () => {
   const {device} = fakeDevice({wrongPage:true}); await device.connect(); await assert.rejects(device.getFile(11),/страница файла/); device.close();
+});
+test('debug SysEx faults the transport and rejects all further FILE traffic', async () => {
+  const input = new Input(), sent = [], fatals = [];
+  const transport = new SysexTransport(input, { send: bytes => sent.push(bytes) }, { timeout: 100, onFatal: (error, frame) => fatals.push([error, frame]) });
+  const pending = transport.request(1, 5, [4, 0, 0, 0, 0]);
+  const debug = Uint8Array.from([240, 0, 32, 118, 51, 51, ...text('err pattern 187 2_5_1'), 247]);
+  assert.equal(parseDebugFrame(debug).text, 'err pattern 187 2_5_1'); input.emit(debug);
+  await assert.rejects(pending, /критическую ошибку/); assert.equal(fatals.length, 1); assert.equal(transport.faulted, true);
+  await assert.rejects(transport.request(1, 5, [4, 0, 0, 0, 0]), /заблокировано/); assert.equal(sent.length, 1); transport.close();
 });

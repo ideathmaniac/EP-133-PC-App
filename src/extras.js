@@ -1,13 +1,20 @@
 import { zipSync } from 'fflate';
-import { PakArchive, inspectWav, pcm16ToWav } from './backup.mjs';
+import { PakArchive, inspectWav, pcm16ToWav, readTar } from './backup.mjs';
 import { SysexTransport, ReadOnlyDevice } from './sysex.mjs';
+import { importKoProject, inspectPatternLayout, prepareRenderProject } from './ko-project.mjs';
 
-export function initExtras({ message, download, importSample, target }) {
+export function initExtras({ message, download, importSample, target, loadProject, stopPlayback }) {
   const $ = id => document.getElementById(id);
   const guard = fn => async (...args) => { try { await fn(...args); } catch (error) { message('Ошибка: ' + error.message); } };
   const sizeLabel = n => n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
   const baseName = name => name.split('/').at(-1).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') || 'file';
-  let archive = null, entry = null, archiveName = '', previewContext, previewSource, previewRevision = 0;
+  let archive = null, entry = null, archiveName = '', previewContext, previewSource, previewRevision = 0, dragged = null;
+  const tags = ['kick', 'snare', 'hat', 'perc', 'bass', 'melodic', 'loop', 'fx', 'other'];
+  let favorites = new Set(); try { favorites = new Set(JSON.parse(localStorage.getItem('ep133-sample-favorites') || '[]')); } catch {}
+  const tagOf = file => { const text = file.path.toLocaleLowerCase(), bank = Math.floor(Number(file.path.match(/(?:^|\/)(\d{3})\s/)?.[1]) / 100); if (/kick|bd\b/.test(text) || bank === 0) return 'kick'; if (/snare|clap|sd\b/.test(text) || bank === 1) return 'snare'; if (/hat|cym|ride|crash|hh\b/.test(text) || bank === 2) return 'hat'; if (/perc|tom|conga|shaker/.test(text) || bank === 3) return 'perc'; if (/bass|sub/.test(text) || bank === 4) return 'bass'; if (/loop|break/.test(text) || bank === 6) return 'loop'; if (/fx|sfx|noise|impact|rise/.test(text) || bank === 9) return 'fx'; if (/key|synth|piano|guitar|chord|lead|vocal/.test(text) || bank === 5) return 'melodic'; return 'other'; };
+  for (const id of ['backupTag', 'sampleDockTag']) for (const tag of tags) { const option = document.createElement('option'); option.value = tag; option.textContent = tag.toUpperCase(); $(id).append(option); }
+  function saveFavorites() { try { localStorage.setItem('ep133-sample-favorites', JSON.stringify([...favorites])); } catch {} }
+  function toggleFavorite(path) { favorites.has(path) ? favorites.delete(path) : favorites.add(path); saveFavorites(); renderFiles(); renderSampleDock(); }
   const bankNames = ['KICK', 'SNARE', 'CYMB', 'PERC', 'BASS', 'MELOD', 'LOOP', 'USER 1', 'USER 2', 'SFX'];
   bankNames.forEach((name, i) => { const option = document.createElement('option'); option.value = String(i); option.textContent = `${i} / ${name}`; $('backupBank').append(option); });
   try { $('theme').value = localStorage.getItem('ep133-theme') || 'orange'; } catch {}
@@ -16,23 +23,33 @@ export function initExtras({ message, download, importSample, target }) {
   function stopPreview() { previewRevision++; try { previewSource?.stop(); } catch {} previewSource = null; }
   $('entryStop').onclick = stopPreview;
   function rows() {
-    const search = $('backupSearch').value.toLocaleLowerCase(), kind = $('backupKind').value, bank = $('backupBank').value;
-    return archive?.entries.filter(e => !e.directory && (kind === 'all' || e.kind === kind) && e.path.toLocaleLowerCase().includes(search) && (bank === 'all' || e.kind === 'sound' && Math.floor(Number(e.path.match(/(?:^|\/)(\d{3})\s/)?.[1]) / 100) === Number(bank))) || [];
+    const search = $('backupSearch').value.toLocaleLowerCase(), kind = $('backupKind').value, bank = $('backupBank').value, tag = $('backupTag').value, onlyFavorites = $('backupFavorites').checked;
+    return archive?.entries.filter(e => !e.directory && (kind === 'all' || e.kind === kind) && e.path.toLocaleLowerCase().includes(search) && (bank === 'all' || e.kind === 'sound' && Math.floor(Number(e.path.match(/(?:^|\/)(\d{3})\s/)?.[1]) / 100) === Number(bank)) && (tag === 'all' || e.kind === 'sound' && tagOf(e) === tag) && (!onlyFavorites || e.kind === 'sound' && favorites.has(e.path))) || [];
   }
   function renderFiles() {
     const list = $('backupFiles'); list.replaceChildren();
     for (const file of rows()) {
       const tr = document.createElement('tr'); tr.className = file === entry ? 'selected' : '';
-      const td = document.createElement('td'), button = document.createElement('button'); button.className = 'file-button'; button.textContent = (file.kind === 'sound' ? '♪ ' : file.kind === 'project' ? '▣ ' : '') + file.path; button.onclick = guard(() => selectEntry(file)); td.append(button); tr.append(td);
+      const td = document.createElement('td'); if (file.kind === 'sound') { const star = document.createElement('button'); star.className = 'favorite-button' + (favorites.has(file.path) ? ' active' : ''); star.textContent = '★'; star.title = 'Избранное'; star.onclick = event => { event.stopPropagation(); toggleFavorite(file.path); }; td.append(star); } const button = document.createElement('button'); button.className = 'file-button'; button.textContent = (file.kind === 'sound' ? `♪ [${tagOf(file)}] ` : file.kind === 'project' ? '▣ ' : '') + file.path; button.onclick = guard(() => selectEntry(file)); button.draggable = file.kind === 'sound'; button.ondragstart = () => { dragged = file; }; button.ondragend = () => { dragged = null; }; td.append(button); tr.append(td);
       const size = document.createElement('td'); size.textContent = sizeLabel(file.size); tr.append(size); list.append(tr);
     }
   }
+  function renderSampleDock() {
+    const dock = $('sampleDock'); dock.replaceChildren(); if (!archive) { const empty = document.createElement('span'); empty.className = 'muted'; empty.textContent = 'Откройте .pak / .zip в библиотеке бэкапа.'; dock.append(empty); return; }
+    const search = $('sampleDockSearch').value.toLocaleLowerCase(), tag = $('sampleDockTag').value, onlyFavorites = $('sampleDockFavorites').checked;
+    const sounds = archive.entries.filter(file => file.kind === 'sound' && file.path.toLocaleLowerCase().includes(search) && (tag === 'all' || tagOf(file) === tag) && (!onlyFavorites || favorites.has(file.path)));
+    for (const file of sounds.slice(0, 200)) { const chip = document.createElement('div'); chip.className = 'sample-chip'; chip.draggable = true; chip.ondragstart = () => { dragged = file; }; chip.ondragend = () => { dragged = null; }; const star = document.createElement('button'); star.className = 'favorite-button' + (favorites.has(file.path) ? ' active' : ''); star.textContent = '★'; star.onclick = event => { event.stopPropagation(); toggleFavorite(file.path); }; const name = document.createElement('span'); name.className = 'sample-name'; name.textContent = `[${tagOf(file)}] ${baseName(file.path)}`; name.title = file.path; chip.onclick = guard(() => selectEntry(file)); chip.append(star, name); dock.append(chip); }
+    if (!sounds.length) { const empty = document.createElement('span'); empty.className = 'muted'; empty.textContent = 'Ничего не найдено.'; dock.append(empty); }
+  }
+  async function importEntryToPad(index) { if (!dragged || dragged.kind !== 'sound' || !archive) throw new Error('Перетащите WAV из открытого бэкапа'); const file = dragged, bytes = archive.extract(file), info = inspectWav(bytes); await importSample(bytes, baseName(file.path), info.metadata, index); message(`Сэмпл загружен на пэд ${index % 12 + 1}.`); }
   function selectEntry(file) {
-    stopPreview(); entry = file; $('entryTitle').textContent = file.path; $('entryDownload').disabled = false;
+    stopPreview(); entry = file; $('openKoProject').disabled = file.kind !== 'project'; $('entryTitle').textContent = file.path; $('entryDownload').disabled = false;
     $('entryPreview').disabled = $('entryImport').disabled = file.kind !== 'sound'; $('entryTarget').textContent = 'Цель импорта: ' + target();
     if (file.kind === 'project') {
       const members = archive.project(file);
-      $('entryDetails').textContent = `${members.filter(e => !e.directory).length} файлов внутри TAR\n\n` + members.map(e => `${e.directory ? '[DIR]' : sizeLabel(e.size).padStart(9)}  ${e.name}`).join('\n') + '\n\nБинарные данные пэдов и паттернов не интерпретируются. Экспорт MIDI из TAR пока недоступен.';
+      const patterns = members.filter(e => !e.directory && /^patterns\/[a-d]\d{2}$/i.test(e.name));
+      const summary = patterns.map(e => { try { const p = inspectPatternLayout(e.data); return `${e.name.slice(9).toUpperCase()}: ${p.bars} такт., ${p.count} записей`; } catch (error) { return `${e.name}: ${error.message}`; } });
+      $('entryDetails').textContent = `Паттерны: ${patterns.length}\n${summary.join('\n') || 'Файлов паттернов нет.'}\n\n` + `${members.filter(e => !e.directory).length} файлов внутри TAR\n\n` + members.map(e => `${e.directory ? '[DIR]' : sizeLabel(e.size).padStart(9)}  ${e.name}`).join('\n');
     } else if (file.kind === 'sound') {
       const info = inspectWav(archive.extract(file));
       $('entryDetails').textContent = `${info.sampleRate} Гц / ${info.channels} канал(а) / ${info.bits} бит\n${info.duration?.toFixed(3)} с\n\nМетаданные Teenage Engineering:\n${JSON.stringify(info.metadata, null, 2)}${info.metadataError ? '\n' + info.metadataError : ''}`;
@@ -42,19 +59,27 @@ export function initExtras({ message, download, importSample, target }) {
   }
   function openArchive(bytes, name) {
     const next = new PakArchive(bytes); stopPreview(); archive = next; archiveName = name; entry = null;
+    $('openKoProject').disabled = true;
     $('entryTitle').textContent = 'Выберите файл'; $('entryDetails').textContent = 'Архив открыт. Выберите WAV для прослушивания или TAR для просмотра проекта.';
     $('entryPreview').disabled = $('entryImport').disabled = $('entryDownload').disabled = true;
-    $('backupSearch').value = ''; $('backupKind').value = $('backupBank').value = 'all';
+    $('backupSearch').value = ''; $('backupKind').value = $('backupBank').value = $('backupTag').value = 'all';
     const sounds = archive.entries.filter(x => x.kind === 'sound'), projects = archive.entries.filter(x => x.kind === 'project');
     const meta = archive.metadata;
     $('backupInfo').textContent = `${name} · ${archive.entries.length} записей` + (meta ? ` · ${meta.device_name || 'устройство неизвестно'} · OS ${meta.device_version || '?'} · тип ${meta.pak_type || '?'}` : ' · метаданные .pak отсутствуют');
     $('backupSummary').replaceChildren();
     for (const label of [`${sounds.length} сэмплов`, `${projects.length} проектов`, sizeLabel(sounds.reduce((n, x) => n + x.size, 0)) + ' WAV']) { const el = document.createElement('span'); el.textContent = label; $('backupSummary').append(el); }
-    renderFiles(); message('Бэкап открыт. Оригинал не изменён.');
+    renderFiles(); renderSampleDock(); message('Бэкап открыт. Оригинал не изменён.');
   }
+  const toBase64 = bytes => { let text = ''; for (let at = 0; at < bytes.length; at += 8192) text += String.fromCharCode(...bytes.subarray(at, at + 8192)); return btoa(text); };
+  $('openKoProject').onclick = guard(async () => {
+    if (!archive || entry?.kind !== 'project') throw new Error('Выберите TAR проекта в бэкапе');
+    const result = importKoProject(archive, entry, { toBase64 }); stopPlayback(); if (await loadProject(result.session) === false) return; document.querySelector('[data-view="studio"]').click();
+    message(`Открыто нот: ${result.session.patterns.reduce((sum, pattern) => sum + pattern.notes.length, 0)}. ${result.warnings.join(' ')}`);
+  });
   $('openBackup').onclick = () => $('fileBackup').click();
   $('fileBackup').onchange = guard(async event => { const file = event.target.files[0]; event.target.value = ''; if (!file) return; if (file.size > 256 * 1024 * 1024) throw new Error('Лимит архива: 256 МБ'); openArchive(new Uint8Array(await file.arrayBuffer()), file.name); });
-  for (const id of ['backupSearch', 'backupKind', 'backupBank']) $(id).addEventListener(id === 'backupSearch' ? 'input' : 'change', renderFiles);
+  for (const id of ['backupSearch', 'backupKind', 'backupBank', 'backupTag', 'backupFavorites']) $(id).addEventListener(id === 'backupSearch' ? 'input' : 'change', renderFiles);
+  for (const id of ['sampleDockSearch', 'sampleDockTag', 'sampleDockFavorites']) $(id).addEventListener(id === 'sampleDockSearch' ? 'input' : 'change', renderSampleDock);
   $('entryPreview').onclick = guard(async () => { if (!entry || !archive) return; stopPreview(); const rev = previewRevision; const bytes = archive.extract(entry); previewContext ||= new AudioContext(); await previewContext.resume(); const buffer = await previewContext.decodeAudioData(bytes.slice().buffer); if (rev !== previewRevision) return; previewSource = previewContext.createBufferSource(); previewSource.buffer = buffer; previewSource.connect(previewContext.destination); previewSource.start(); message('Прослушивание WAV из бэкапа.'); });
   $('entryDownload').onclick = guard(() => { if (entry) download(archive.extract(entry, 128 * 1024 * 1024), baseName(entry.path), 'application/octet-stream'); });
   $('entryImport').onclick = guard(async () => { if (!entry || entry.kind !== 'sound') return; stopPreview(); const bytes = archive.extract(entry), info = inspectWav(bytes); await importSample(bytes, baseName(entry.path), info.metadata); message(`Сэмпл загружен в локальный проект: ${target()}. Метаданные TE сохранены; эффекты не эмулируются.`); });
@@ -68,7 +93,7 @@ export function initExtras({ message, download, importSample, target }) {
   let access, transport, device, connecting = false, active = false, selectedNode = null, nodeMetadata = null, deviceEpoch = 0, currentFolder = { id: 0, path: '/' }, parents = [];
   const log = [];
   function addLog(direction, data) { const hex = Array.from(data.subarray(0, 80), x => x.toString(16).padStart(2, '0')).join(' '); log.push(`${new Date().toISOString()} ${direction} [${data.length}] ${hex}${data.length > 80 ? ' …' : ''}`); if (log.length > 300) log.shift(); $('midiLog').textContent = log.join('\n'); }
-  function setBusy(value) { active = value; $('connectDevice').disabled = connecting || !!device; $('scanMidi').disabled = connecting || !!device; $('midiInput').disabled = $('midiOutput').disabled = connecting || !!device; $('deviceUp').disabled = value || !device || !parents.length; $('deviceRefresh').disabled = value || !device; $('deviceProject').disabled = value || !device || !/^\/projects\/[^/]+$/.test(currentFolder.path) || !(currentFolder.flags & 4); $('nodeMetadata').disabled = value || !device || !selectedNode; $('nodeDownload').disabled = value || !device || !selectedNode || !(selectedNode.flags & 4); $('nodeImport').disabled = value || !device || !selectedNode || !isSound(selectedNode); }
+  function setBusy(value) { active = value; $('connectDevice').disabled = connecting || !!device; $('scanMidi').disabled = connecting || !!device; $('midiInput').disabled = $('midiOutput').disabled = connecting || !!device; $('deviceUp').disabled = value || !device || !parents.length; $('deviceRefresh').disabled = value || !device; $('readKoLive').disabled = $('deviceProject').disabled = value || !device || !/^\/projects\/[^/]+$/.test(currentFolder.path) || !(currentFolder.flags & 4); $('nodeMetadata').disabled = value || !device || !selectedNode; $('nodeDownload').disabled = value || !device || !selectedNode || !(selectedNode.flags & 4); $('nodeImport').disabled = value || !device || !selectedNode || !isSound(selectedNode); }
   const isSound = node => node && currentFolder.path.replace(/\/$/, '') === '/sounds' && !node.directory;
   async function operation(fn) { if (active) throw new Error('Дождитесь завершения чтения'); const epoch = deviceEpoch; setBusy(true); try { return await fn(epoch); } finally { if (epoch === deviceEpoch) setBusy(false); } }
   function disconnect(reason = 'Соединение закрыто.') { deviceEpoch++; device?.close(); transport?.close(); device = transport = null; connecting = false; selectedNode = null; nodeMetadata = null; currentFolder = { id: 0, path: '/' }; parents = []; $('deviceFiles').replaceChildren(); $('deviceInfo').textContent = reason; $('nodeDetails').textContent = 'Выберите устройство и подключитесь заново.'; $('devicePath').textContent = '/'; $('deviceStatus').textContent = '● OFFLINE · устройство не подключено'; setBusy(false); }
@@ -100,7 +125,7 @@ export function initExtras({ message, download, importSample, target }) {
   $('connectDevice').onclick = guard(async () => {
     if (!access) throw new Error('Сначала обновите MIDI-порты'); const input = access.inputs.get($('midiInput').value), output = access.outputs.get($('midiOutput').value); if (!input || !output) throw new Error('Выберите вход и выход EP-133');
     const epoch = ++deviceEpoch; connecting = true; setBusy(true); $('deviceInfo').textContent = 'MIDI Identity Request → GREET → File INIT…';
-    try { await input.open(); await output.open(); if (epoch !== deviceEpoch) return; transport = new SysexTransport(input, output, { log: addLog }); const next = new ReadOnlyDevice(transport); await next.connect(); if (epoch !== deviceEpoch) { next.close(); return; } device = next; connecting = false; $('deviceInfo').textContent = `EP-133 / ${next.identity.sku}\nOS: ${next.metadata.os_version || '?'}\nСерийный номер скрыт в интерфейсе.\nРежим: чтение. Совместимость OS 2.5 на устройстве ещё не проверена.`; $('deviceStatus').textContent = `● MIDI · EP-133 / OS ${next.metadata.os_version || '?'}`; parents = []; await readFolder({ id: 0, path: '/' }, epoch); message('EP-133 ответил. Доступно чтение файлов и метаданных.'); }
+    try { await input.open(); await output.open(); if (epoch !== deviceEpoch) return; transport = new SysexTransport(input, output, { log: addLog, onFatal: error => disconnect(error.message) }); const next = new ReadOnlyDevice(transport); await next.connect(); if (epoch !== deviceEpoch) { next.close(); return; } device = next; connecting = false; $('deviceInfo').textContent = `EP-133 / ${next.identity.sku}\nOS: ${next.metadata.os_version || '?'}\nСерийный номер скрыт в интерфейсе.\nРежим: безопасное чтение; запись на устройство отключена.`; $('deviceStatus').textContent = `● MIDI · EP-133 / OS ${next.metadata.os_version || '?'}`; parents = []; await readFolder({ id: 0, path: '/' }, epoch); message('EP-133 ответил. Доступно чтение файлов, паттернов и метаданных.'); }
     catch (error) { if (epoch === deviceEpoch) disconnect(error.message); throw error; }
     finally { if (epoch === deviceEpoch) { connecting = false; setBusy(false); } }
   });
@@ -108,6 +133,13 @@ export function initExtras({ message, download, importSample, target }) {
   $('deviceRefresh').onclick = guard(() => operation(epoch => readFolder(currentFolder, epoch)));
   $('deviceUp').onclick = guard(() => operation(async epoch => { const parent = parents.at(-1); if (!parent) return; await readFolder(parent, epoch); parents.pop(); }));
   $('deviceProject').onclick = guard(() => operation(async epoch => { const folder = currentFolder; const file = await device.getFile(folder.id, (n, total) => { if (epoch === deviceEpoch) message(`Чтение проекта: ${Math.floor(n / total * 100)}%`); }); if (epoch !== deviceEpoch) return; download(file.bytes, baseName(folder.name) + '.tar', 'application/x-tar'); message('Архив проекта подготовлен для сохранения.'); }));
+  $('readKoLive').onclick = guard(() => operation(async epoch => {
+    const folder = currentFolder, file = await device.getFile(folder.id, (n, total) => message(`Чтение проекта: ${Math.floor(n / total * 100)}%`));
+    if (epoch !== deviceEpoch) return;
+    const source = { entries: [], project: () => readTar(file.bytes) }, result = importKoProject(source, { path: folder.path + '.tar' }, { toBase64 });
+    stopPlayback(); if (await loadProject(result.session) === false) return; document.querySelector('[data-view="studio"]').click();
+    message(`Прочитано нот с EP-133: ${result.session.patterns.reduce((sum, pattern) => sum + pattern.notes.length, 0)}. Для звука используйте MIDI-выход или WAV-экспорт.`);
+  }));
   $('nodeMetadata').onclick = guard(() => operation(async epoch => { const metadata = await device.getMetadata(selectedNode.id); if (epoch !== deviceEpoch) return; nodeMetadata = metadata; $('nodeDetails').textContent = JSON.stringify(metadata, null, 2); }));
   async function readNode(epoch) {
     const node = selectedNode, sound = isSound(node), session = device;
@@ -126,5 +158,12 @@ export function initExtras({ message, download, importSample, target }) {
   $('exportLog').onclick = () => download(log.join('\n'), 'ep133-midi-log.txt', 'text/plain');
   setBusy(false);
   window.addEventListener('unload', () => { stopPreview(); device?.close(); transport?.close(); });
-  return { openArchive, selectEntry, rows, stopPreview, getArchive: () => archive, getLog: () => log, refresh: () => { setBusy(active); $('entryTarget').textContent = 'Цель импорта: ' + target(); } };
+  async function prepareAudioExport(project) {
+    return operation(() => prepareRenderProject(project, { toBase64, readSlot: async slot => {
+      if (!device) throw new Error('Для WAV подключите EP-133 или откройте проект из бэкапа с WAV-сэмплами.');
+      message(`Загрузка сэмпла ${slot} для WAV…`); const metadata = await device.getMetadata(slot), file = await device.getFile(slot);
+      const riff = file.bytes.length >= 12 && new TextDecoder().decode(file.bytes.subarray(0, 4)) === 'RIFF'; return { bytes: file.bytes, metadata, riff };
+    } }));
+  }
+  return { prepareAudioExport, openArchive, selectEntry, rows, stopPreview, importEntryToPad, draggedSample: () => dragged, getArchive: () => archive, getLog: () => log, refresh: () => { setBusy(active); $('entryTarget').textContent = 'Цель импорта: ' + target(); renderSampleDock(); } };
 }

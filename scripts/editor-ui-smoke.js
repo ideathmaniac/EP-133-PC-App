@@ -10,7 +10,7 @@
   fire(arr,'pointerdown',333,45);fire(arr,'pointerup',461,45);checks.resizeClip=api.get().clips[1].repeats===2;
   fire(arr,'pointerdown',105,45);fire(arr,'pointerup',489,45);checks.moveClip=api.get().clips[0].start===11520;
   fire(arr,'pointerdown',150,10,{shiftKey:true});fire(arr,'pointermove',285,10);fire(arr,'pointerup',285,10);checks.loopRange=$('loopStart').value==='2'&&$('loopEnd').value==='5';
-  fire(roll,'dblclick',104,174);checks.addNote=note()?.start===240&&note()?.pitch===60;
+  fire(roll,'dblclick',104,174);checks.addNote=note()?.start===240&&note()?.pitch===60;fire(roll,'dblclick',104,174);checks.doubleClickDelete=api.get().patterns[0].notes.length===0;await $('undo').onclick();checks.undoDoubleClick=note()?.start===240&&note()?.pitch===60;
   fire(roll,'pointerdown',102,174);fire(roll,'pointerup',124,150);checks.moveNote=note()?.start===360&&note()?.pitch===62;
   fire(roll,'pointerdown',140,150);fire(roll,'pointerup',184,150);checks.resizeNote=note()?.duration===360;
   fire(roll,'pointerdown',123,350);fire(roll,'pointerup',123,350);checks.velocity=note()?.velocity===85;
@@ -23,6 +23,7 @@
   $('deleteSelection').click();checks.deleteSelection=api.get().patterns[0].notes.length===0;await $('undo').onclick();checks.undoDelete=api.get().patterns[0].notes.length===2;
   const auto=$('autoCanvas');fire(auto,'pointerdown',80,80);fire(auto,'pointerup',80,80);fire(auto,'pointerdown',208,10);fire(auto,'pointerup',208,10);checks.automation=api.get().automation[0]?.points.length===2;
   change('sceneAt',3);$('sceneName').value='UI test';$('sceneSave').click();change('sceneAt',1);$('sceneInsert').click();checks.scenes=api.get().scenes.length===1&&api.get().clips.length===3&&api.get().clips.some(c=>c.start===0);
+  $('songAdd').click();$('songAdd').click();checks.songEditor=api.get().song.length===2&&document.querySelectorAll('.song-item').length===2;document.querySelector('.song-item-actions button:last-child').click();checks.songRemove=api.get().song.length===1;
   const patterns=api.get().patterns.length;$('patternCopy').click();checks.copyPattern=api.get().patterns.length===patterns+1&&api.get().patterns.at(-1).notes.length===2;
   await api.flushAutosave();const stored=JSON.parse(await window.desktop.loadAutosave());checks.autosave=stored.scenes[0]?.name==='UI test'&&stored.patterns.length===5;
   api.commit(p=>{p.patterns.at(-1).notes[0].pitch=61;p.patterns.at(-1).notes[1].pitch=63;});
@@ -34,10 +35,13 @@
   fire(roll,'dblclick',323,162);checks.snapCreate=api.get().patterns.at(-1).notes.at(-1).pitch===60;
   fire(roll,'pointerdown',323,174);fire(roll,'pointerup',345,138);checks.snapDrag=api.get().patterns.at(-1).notes.at(-1).pitch===62;
   $('copySelection').click();change('scaleRoot',1);fire(roll,'pointerdown',494,10);fire(roll,'pointerup',494,10);$('pasteSelection').click();checks.snapPaste=api.get().patterns.at(-1).notes.at(-1).pitch===61;
+  $('ghostNotes').checked=true;$('ghostNotes').dispatchEvent(new Event('change'));checks.ghostNotes=$('ghostNotes').checked&&localStorage.getItem('ep133-ghost-notes')==='true';
   document.querySelector('[data-transpose="1"]').click();checks.diatonicStep=api.get().patterns.at(-1).notes.at(-1).pitch===63;
   change('keySpelling','flats');checks.flatNames=$('scaleNotes').textContent.startsWith('D♭ · E♭');
   await api.flushAutosave();const tonalSave=JSON.parse(await window.desktop.loadAutosave());checks.tonalityAutosave=tonalSave.tonality.root===1&&tonalSave.tonality.scale==='major'&&tonalSave.tonality.snap&&tonalSave.tonality.spelling==='flats';
   await api.load(tonalSave);checks.tonalityRestore=$('scaleRoot').value==='1'&&$('scaleSnap').checked&&$('keySpelling').value==='flats';
+  const mixerA=document.querySelector('.mixer-channel[data-group="0"]'),muteA=mixerA.querySelector('[data-mix="mute"]');muteA.click();checks.mixerMute=api.get().groupMix[0].mute&&muteA.classList.contains('on');await $('undo').onclick();checks.undoMixer=!api.get().groupMix[0].mute;
+  $('collapseArrangement').click();checks.collapseCard=document.querySelector('.arrangement-card').classList.contains('collapsed');$('collapseArrangement').click();checks.expandCard=!document.querySelector('.arrangement-card').classList.contains('collapsed');
   await api.load(original);api.selectPad(3);change('scaleRoot',2);change('scaleMode','dorian');$('scaleSnap').checked=true;$('scaleSnap').dispatchEvent(new Event('change'));window.scrollTo(0,0);
   return{passed:Object.values(checks).every(Boolean),...checks};
 })()
